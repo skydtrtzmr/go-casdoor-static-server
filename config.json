@@ -1,0 +1,8 @@
+{
+  "listen_addr": ":8766",
+  "quartz_dir": "D:/CodeProjects/quartz/public",
+  "casdoor_addr": "http://127.0.0.1:8000",
+  "client_id": "fdf1263c0bd4af32e8da",
+  "app_name": "quartz_proxy",
+  "redirect_path": "http://127.0.0.1:8766/callback"
+}
