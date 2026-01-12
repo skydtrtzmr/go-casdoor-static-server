@@ -69,8 +69,10 @@ func handleMain(w http.ResponseWriter, r *http.Request) {
 	// 3. 【路径补全逻辑】
 	// 处理 Quartz 这种静态站点的 URL 特性
 	finalPath := urlPath
-	if urlPath == "/" {
-		finalPath = "/index.html"
+	if strings.HasSuffix(urlPath, "/") {
+		// 情况 A: 访问根目录 / 或 文件夹 /folder/
+		// 映射到 /index.html 或 /folder/index.html
+		finalPath = filepath.Join(urlPath, "index.html")
 	} else if filepath.Ext(urlPath) == "" {
 		// 访问 /my-note 映射到 /my-note.html
 		finalPath = urlPath + ".html"
@@ -183,7 +185,15 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveQuartzFile(w http.ResponseWriter, r *http.Request, relPath string) {
-	fullPath := filepath.Join(conf.QuartzDir, filepath.FromSlash(strings.TrimPrefix(relPath, "/")))
+	// 1. 统一斜杠方向并清理多余斜杠
+	cleanRelPath := filepath.Clean(filepath.FromSlash(relPath))
+
+	// 2. 拼接完整路径 (conf.QuartzDir 已经是绝对路径或规范路径)
+	fullPath := filepath.Join(conf.QuartzDir, cleanRelPath)
+
+	// 3. 调试日志：如果还是 404，看这里打印出来的路径对不对
+	// log.Printf("[DEBUG] 尝试读取文件: %s", fullPath)
+
 	http.ServeFile(w, r, fullPath)
 }
 
