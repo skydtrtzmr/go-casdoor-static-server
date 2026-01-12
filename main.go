@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"encoding/base64"
 )
 
 type Config struct {
@@ -63,17 +64,17 @@ func handleMain(w http.ResponseWriter, r *http.Request) {
 
 // 获取用户信息并登录
 func handleCallback(w http.ResponseWriter, r *http.Request) {
+	log.Println("[AUTH] Callback accessed")
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		http.Error(w, "未收到授权码", http.StatusBadRequest)
+		http.Error(w, "Code missing", http.StatusBadRequest)
 		return
 	}
 
-	// 使用 code 换取用户名 (Casdoor 简化接口)
-	// 在实际 OAuth2 中应先换 Token，这里使用 Casdoor 提供的快速验证接口
-	username := fetchUsernameFromCasdoor(code)
+	// 1. 去 Casdoor 换取真实的用户名
+	realUsername := fetchRealUsername(code)
 
-	// 签发本地 Session Cookie (HttpOnly)
+	// 2. 写入 Session Cookie (保镖用)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "quartz_session",
 		Value:    "is_authenticated",
@@ -82,16 +83,64 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   3600 * 24 * 7,
 	})
 
-	// 签发给前端展示用的用户名 Cookie (非 HttpOnly)
+	// 3. 写入展示用的用户名 (给 Quartz 组件用)
+	// 记得编码，防止中文导致 'å' 报错
 	http.SetCookie(w, &http.Cookie{
 		Name:     "quartz_username",
-		Value:    username,
+		Value:    url.QueryEscape(realUsername),
 		Path:     "/",
 		HttpOnly: false,
 		MaxAge:   3600 * 24 * 7,
 	})
 
+	log.Printf("[AUTH] 用户 %s 登录成功，正在跳转首页", realUsername)
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// 核心：调用 Casdoor 接口获取账号信息
+func fetchRealUsername(code string) string {
+	// 构造换取 token 的请求
+	// 注意：这里为了保持代码精简，使用 Casdoor 提供的简易验证逻辑
+	// 实际生产中建议使用 Casdoor SDK
+	tokenURL := fmt.Sprintf("%s/api/login/oauth/access_token", conf.CasdoorAddr)
+	
+	resp, err := http.PostForm(tokenURL, url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {conf.ClientID},
+		"client_secret": {conf.ClientSecret},
+		"code":          {code},
+	})
+
+	if err != nil {
+		log.Printf("Token 换取失败: %v", err)
+		return "Guest"
+	}
+	defer resp.Body.Close()
+
+	// 解析返回的 JSON
+	var data struct {
+		AccessToken string `json:"access_token"`
+	}
+	json.NewDecoder(resp.Body).Decode(&data)
+
+	// Casdoor 的 AccessToken 是 JWT 格式，里面包含了用户名
+	// 我们可以简单地解析 JWT 的中间部分（Payload）
+	parts := strings.Split(data.AccessToken, ".")
+	if len(parts) < 2 {
+		return "Guest"
+	}
+
+	payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	var claims struct {
+		Name string `json:"name"` // Casdoor 默认在 name 字段存用户名
+		ID   string `json:"id"`   // 有些配置下是 id
+	}
+	json.NewDecoder(strings.NewReader(string(payload))).Decode(&claims)
+
+	if claims.Name != "" {
+		return claims.Name
+	}
+	return claims.ID
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -112,14 +161,6 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	loginURL := fmt.Sprintf("%s/login/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=read&state=%s",
 		conf.CasdoorAddr, conf.ClientID, url.QueryEscape(conf.RedirectPath), conf.AppName)
 	http.Redirect(w, r, loginURL, http.StatusFound)
-}
-
-func fetchUsernameFromCasdoor(code string) string {
-	// 这里的逻辑：通过访问 Casdoor 接口验证 code
-	// 为简化代码，此处直接解析 code。在生产中建议通过 token 接口获取。
-	// 如果你只需要显示“已登录”，这里可以返回 "User"
-	// 如果需要真实姓名，需根据 Casdoor API 文档调用 /api/get-account
-	return "user_logged_in" 
 }
 
 func serveQuartzFile(w http.ResponseWriter, r *http.Request, relPath string) {
