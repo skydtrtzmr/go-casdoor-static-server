@@ -1,5 +1,6 @@
 {
   "listen_addr": ":8766",
+  "base_url": "http://127.0.0.1:8766",
   "quartz_dir": "D:/CodeProjects/quartz/public",
   "casdoor_addr": "http://127.0.0.1:8000",
   "client_id": "你的客户端ID",

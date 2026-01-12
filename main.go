@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"encoding/base64"
 )
 
 type Config struct {
@@ -39,26 +39,45 @@ func main() {
 func handleMain(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Path
 
-	// 1. 静态资源直通
-	if isStaticResource(urlPath) {
+	// 1. 【放行清单】
+	// 即使没登录也允许访问的资源（如 favicon、以及潜在的公开静态资源）
+	if urlPath == "/favicon.ico" {
 		serveQuartzFile(w, r, urlPath)
 		return
 	}
 
-	// 2. 鉴权检查
+	// 2. 【核心拦截逻辑】
+	// 如果用户没有合法的 Cookie (quartz_session)
 	if !checkAuth(r) {
+		// A. 如果用户请求的是 JS/CSS/JSON 等资源文件
+		// 我们不能重定向到登录页，否则浏览器解析 HTML 登录页时会报错（Unexpected token '<'）
+		if isStaticResource(urlPath) {
+			log.Printf("[BLOCK] 拦截到未授权资源请求: %s", urlPath)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// B. 如果用户请求的是正常的页面 (HTML 或 目录)
+		// 此时才跳转到 Casdoor 进行登录
+		log.Printf("[AUTH] 重定向页面请求到登录页: %s", urlPath)
 		redirectToLogin(w, r)
 		return
 	}
 
-	// 3. Quartz 路径补全
+	// --- 以下逻辑仅在【已登录】状态下执行 ---
+
+	// 3. 【路径补全逻辑】
+	// 处理 Quartz 这种静态站点的 URL 特性
 	finalPath := urlPath
 	if urlPath == "/" {
 		finalPath = "/index.html"
 	} else if filepath.Ext(urlPath) == "" {
+		// 访问 /my-note 映射到 /my-note.html
 		finalPath = urlPath + ".html"
 	}
 
+	// 4. 【正式交付文件】
+	// 从本地磁盘读取文件并返回给浏览器
 	serveQuartzFile(w, r, finalPath)
 }
 
@@ -103,7 +122,7 @@ func fetchRealUsername(code string) string {
 	// 注意：这里为了保持代码精简，使用 Casdoor 提供的简易验证逻辑
 	// 实际生产中建议使用 Casdoor SDK
 	tokenURL := fmt.Sprintf("%s/api/login/oauth/access_token", conf.CasdoorAddr)
-	
+
 	resp, err := http.PostForm(tokenURL, url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {conf.ClientID},
@@ -151,7 +170,7 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	// 动态拼接 Casdoor 退出地址
 	logoutURL := fmt.Sprintf("%s/api/logout?redirect_uri=%s",
 		conf.CasdoorAddr, url.QueryEscape(conf.BaseURL))
-	
+
 	http.Redirect(w, r, logoutURL, http.StatusFound)
 }
 
