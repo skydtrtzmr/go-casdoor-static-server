@@ -165,14 +165,20 @@ func fetchRealUsername(code string) string {
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
-	// 清除所有本地 Cookie
+	// 1. 清除本地 Cookie
 	clearCookie(w, "quartz_session")
 	clearCookie(w, "quartz_username")
 
-	// 动态拼接 Casdoor 退出地址
-	logoutURL := fmt.Sprintf("%s/api/logout?redirect_uri=%s",
-		conf.CasdoorAddr, url.QueryEscape(conf.BaseURL))
+	// 2. 编码重定向目标
+	// 确保 BaseURL 是 http://127.0.0.1:8766
+	target := conf.BaseURL + "/"
+	encodedTarget := url.QueryEscape(target)
 
+	// 3. 构造 Casdoor 登出链接
+	logoutURL := fmt.Sprintf("%s/api/logout?redirect_uri=%s",
+		conf.CasdoorAddr, encodedTarget)
+
+	log.Printf("[AUTH] 正在退出并回跳至: %s", target)
 	http.Redirect(w, r, logoutURL, http.StatusFound)
 }
 
@@ -193,6 +199,16 @@ func serveQuartzFile(w http.ResponseWriter, r *http.Request, relPath string) {
 
 	// 3. 调试日志：如果还是 404，看这里打印出来的路径对不对
 	// log.Printf("[DEBUG] 尝试读取文件: %s", fullPath)
+
+	// 如果请求的是 HTML 文件，禁用缓存，强制浏览器每次回退都要询问服务器
+	if strings.HasSuffix(relPath, ".html") || relPath == "/" {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+	} else {
+		// JS/CSS/图片等资源可以缓存，提升速度
+		w.Header().Set("Cache-Control", "public, max-age=31536000")
+	}
 
 	http.ServeFile(w, r, fullPath)
 }
