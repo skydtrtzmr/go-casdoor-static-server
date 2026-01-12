@@ -3,6 +3,7 @@
   "quartz_dir": "D:/CodeProjects/quartz/public",
   "casdoor_addr": "http://127.0.0.1:8000",
   "client_id": "你的客户端ID",
+  "client_secret": "你的客户端密钥",
   "app_name": "quartz_proxy",
   "redirect_path": "http://127.0.0.1:8766/callback"
 }
