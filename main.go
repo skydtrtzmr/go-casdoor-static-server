@@ -175,13 +175,13 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	target := conf.BaseURL + "/"
 	encodedTarget := url.QueryEscape(target)
 
-	// 3. 构造 Casdoor 登出链接
-	// logoutURL := fmt.Sprintf("%s/api/logout?post_logout_redirect_uri=%s",
-	logoutURL := fmt.Sprintf("%s/api/logout?redirect_uri=%s",
-		conf.CasdoorAddr, encodedTarget)
+	// // 3. 构造 Casdoor 登出链接
+	// // logoutURL := fmt.Sprintf("%s/api/logout?post_logout_redirect_uri=%s",
+	// logoutURL := fmt.Sprintf("%s/api/logout?redirect_uri=%s",
+	// 	conf.CasdoorAddr, encodedTarget)
 
-	log.Printf("[AUTH] 正在退出并回跳至: %s", logoutURL)
-	http.Redirect(w, r, logoutURL, http.StatusFound)
+	log.Printf("[AUTH] 正在退出并回跳至: %s", target)
+	http.Redirect(w, r, encodedTarget, http.StatusFound)
 }
 
 // ---------------- 辅助函数  ----------------
