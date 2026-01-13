@@ -167,6 +167,7 @@ func fetchRealUsername(code string) string {
 func handleLogout(w http.ResponseWriter, r *http.Request) {
 	// 1. 清除本地 Cookie
 	clearCookie(w, "quartz_session")
+	clearCookie(w, "casdoor_session_id")
 	clearCookie(w, "quartz_username")
 
 	// 2. 编码重定向目标
@@ -175,10 +176,11 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	encodedTarget := url.QueryEscape(target)
 
 	// 3. 构造 Casdoor 登出链接
+	// logoutURL := fmt.Sprintf("%s/api/logout?post_logout_redirect_uri=%s",
 	logoutURL := fmt.Sprintf("%s/api/logout?redirect_uri=%s",
 		conf.CasdoorAddr, encodedTarget)
 
-	log.Printf("[AUTH] 正在退出并回跳至: %s", target)
+	log.Printf("[AUTH] 正在退出并回跳至: %s", logoutURL)
 	http.Redirect(w, r, logoutURL, http.StatusFound)
 }
 
