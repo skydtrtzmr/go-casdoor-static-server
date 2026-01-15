@@ -6,6 +6,6 @@
   "auth_pwd_param": "pwd",
   "auth_user": "admin",
   "auth_pwd": "password123",
-  "cookie_max_age": 3600,
+  "cookie_max_age": 0,
   "forbidden_page": "401.html"
 }

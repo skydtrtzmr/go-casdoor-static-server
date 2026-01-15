@@ -98,9 +98,6 @@ func removeAuthParams(w http.ResponseWriter, r *http.Request) {
 // 设置认证 cookie
 func setAuthCookie(w http.ResponseWriter) {
 	maxAge := conf.CookieMaxAge
-	if maxAge <= 0 {
-		maxAge = 3600 // 默认 1 小时
-	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "quartz_auth",
 		Value:    "valid",
@@ -169,8 +166,8 @@ func loadConfig() {
 	if conf.AuthPwdParam == "" {
 		conf.AuthPwdParam = "pwd"
 	}
-	if conf.CookieMaxAge <= 0 {
-		conf.CookieMaxAge = 3600
+	if conf.CookieMaxAge < 0 {
+		conf.CookieMaxAge = 0
 	}
 	if conf.ForbiddenPage == "" {
 		conf.ForbiddenPage = "401.html"
