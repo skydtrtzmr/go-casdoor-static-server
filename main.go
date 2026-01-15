@@ -1,26 +1,24 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 type Config struct {
-	ListenAddr   string `json:"listen_addr"`
-	BaseURL      string `json:"base_url"`
-	QuartzDir    string `json:"quartz_dir"`
-	CasdoorAddr  string `json:"casdoor_addr"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	AppName      string `json:"app_name"`
-	RedirectPath string `json:"redirect_path"`
+	ListenAddr    string `json:"listen_addr"`
+	BaseURL       string `json:"base_url"`
+	QuartzDir     string `json:"quartz_dir"`
+	AuthUserParam string `json:"auth_user_param"`
+	AuthPwdParam  string `json:"auth_pwd_param"`
+	AuthUser      string `json:"auth_user"`
+	AuthPwd       string `json:"auth_pwd"`
+	CookieMaxAge  int    `json:"cookie_max_age"`
+	ForbiddenPage string `json:"forbidden_page"`
 }
 
 var conf Config
@@ -28,217 +26,152 @@ var conf Config
 func main() {
 	loadConfig()
 
-	http.HandleFunc("/callback", handleCallback)
-	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/", handleMain)
 
-	log.Printf("🚀 Quartz 网关已启动: %s", conf.BaseURL)
+	log.Printf("Quartz 网关已启动: %s", conf.BaseURL)
 	log.Fatal(http.ListenAndServe(conf.ListenAddr, nil))
 }
 
 func handleMain(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Path
 
-	// 1. 【放行清单】
-	// 即使没登录也允许访问的资源（如 favicon、以及潜在的公开静态资源）
+	// 放行 favicon
 	if urlPath == "/favicon.ico" {
 		serveQuartzFile(w, r, urlPath)
 		return
 	}
 
-	// 2. 【核心拦截逻辑】
-	// 如果用户没有合法的 Cookie (quartz_session)
-	if !checkAuth(r) {
-		// A. 如果用户请求的是 JS/CSS/JSON 等资源文件
-		// 我们不能重定向到登录页，否则浏览器解析 HTML 登录页时会报错（Unexpected token '<'）
-		if isStaticResource(urlPath) {
-			log.Printf("[BLOCK] 拦截到未授权资源请求: %s", urlPath)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		// B. 如果用户请求的是正常的页面 (HTML 或 目录)
-		// 此时才跳转到 Casdoor 进行登录
-		log.Printf("[AUTH] 重定向页面请求到登录页: %s", urlPath)
-		redirectToLogin(w, r)
+	// 放行 401 页面本身
+	if urlPath == "/"+conf.ForbiddenPage || urlPath == "/"+conf.ForbiddenPage {
+		// 401页面由go服务而非quartz提供。
+		http.ServeFile(w, r, conf.ForbiddenPage)
 		return
 	}
 
-	// --- 以下逻辑仅在【已登录】状态下执行 ---
+	// 检查认证参数
+	userParam := r.URL.Query().Get(conf.AuthUserParam)
+	pwdParam := r.URL.Query().Get(conf.AuthPwdParam)
 
-	// 3. 【路径补全逻辑】
-	// 处理 Quartz 这种静态站点的 URL 特性
+	if userParam != "" && pwdParam != "" {
+		// 首次访问带参数，验证并设置 cookie
+		if userParam == conf.AuthUser && pwdParam == conf.AuthPwd {
+			setAuthCookie(w)
+			log.Printf("[AUTH] 参数验证成功")
+			// 去除参数后继续处理请求
+			removeAuthParams(w, r)
+			return
+		}
+		// 参数错误，重定向到 401 页面
+		log.Printf("[AUTH] 参数错误: user=%s", userParam)
+		http.Redirect(w, r, "/"+conf.ForbiddenPage, http.StatusFound)
+		return
+	}
+
+	// 检查 cookie 是否有效
+	if !checkAuthCookie(r) {
+		log.Printf("[AUTH] 无效的认证，重定向到 401 页面")
+		http.Redirect(w, r, "/"+conf.ForbiddenPage, http.StatusFound)
+		return
+	}
+
+	// 处理路径补全
 	finalPath := urlPath
 	if strings.HasSuffix(urlPath, "/") {
-		// 情况 A: 访问根目录 / 或 文件夹 /folder/
-		// 映射到 /index.html 或 /folder/index.html
 		finalPath = filepath.Join(urlPath, "index.html")
 	} else if filepath.Ext(urlPath) == "" {
-		// 访问 /my-note 映射到 /my-note.html
 		finalPath = urlPath + ".html"
 	}
 
-	// 4. 【正式交付文件】
-	// 从本地磁盘读取文件并返回给浏览器
 	serveQuartzFile(w, r, finalPath)
 }
 
-// 获取用户信息并登录
-func handleCallback(w http.ResponseWriter, r *http.Request) {
-	log.Println("[AUTH] Callback accessed")
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		http.Error(w, "Code missing", http.StatusBadRequest)
-		return
+// 去除 URL 中的认证参数并重定向
+func removeAuthParams(w http.ResponseWriter, r *http.Request) {
+	// 获取不带参数的路径
+	path := r.URL.Path
+
+	// 重定向到纯净路径，cookie 已设置，后续请求会带上 cookie
+	http.Redirect(w, r, path, http.StatusFound)
+}
+
+// 设置认证 cookie
+func setAuthCookie(w http.ResponseWriter) {
+	maxAge := conf.CookieMaxAge
+	if maxAge <= 0 {
+		maxAge = 3600 // 默认 1 小时
 	}
-
-	// 1. 去 Casdoor 换取真实的用户名
-	realUsername := fetchRealUsername(code)
-
-	// 2. 写入 Session Cookie (保镖用)
 	http.SetCookie(w, &http.Cookie{
-		Name:     "quartz_session",
-		Value:    "is_authenticated",
-		Path:     "/",
-		HttpOnly: true,
-		MaxAge:   3600 * 24 * 7,
-	})
-
-	// 3. 写入展示用的用户名 (给 Quartz 组件用)
-	// 记得编码，防止中文导致 'å' 报错
-	http.SetCookie(w, &http.Cookie{
-		Name:     "quartz_username",
-		Value:    url.QueryEscape(realUsername),
+		Name:     "quartz_auth",
+		Value:    "valid",
 		Path:     "/",
 		HttpOnly: false,
-		MaxAge:   3600 * 24 * 7,
+		MaxAge:   maxAge,
 	})
-
-	log.Printf("[AUTH] 用户 %s 登录成功，正在跳转首页", realUsername)
-	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-// 核心：调用 Casdoor 接口获取账号信息
-func fetchRealUsername(code string) string {
-	// 构造换取 token 的请求
-	// 注意：这里为了保持代码精简，使用 Casdoor 提供的简易验证逻辑
-	// 实际生产中建议使用 Casdoor SDK
-	tokenURL := fmt.Sprintf("%s/api/login/oauth/access_token", conf.CasdoorAddr)
-
-	resp, err := http.PostForm(tokenURL, url.Values{
-		"grant_type":    {"authorization_code"},
-		"client_id":     {conf.ClientID},
-		"client_secret": {conf.ClientSecret},
-		"code":          {code},
-	})
-
-	if err != nil {
-		log.Printf("Token 换取失败: %v", err)
-		return "Guest"
-	}
-	defer resp.Body.Close()
-
-	// 解析返回的 JSON
-	var data struct {
-		AccessToken string `json:"access_token"`
-	}
-	json.NewDecoder(resp.Body).Decode(&data)
-
-	// Casdoor 的 AccessToken 是 JWT 格式，里面包含了用户名
-	// 我们可以简单地解析 JWT 的中间部分（Payload）
-	parts := strings.Split(data.AccessToken, ".")
-	if len(parts) < 2 {
-		return "Guest"
-	}
-
-	payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
-	var claims struct {
-		Name string `json:"name"` // Casdoor 默认在 name 字段存用户名
-		ID   string `json:"id"`   // 有些配置下是 id
-	}
-	json.NewDecoder(strings.NewReader(string(payload))).Decode(&claims)
-
-	if claims.Name != "" {
-		return claims.Name
-	}
-	return claims.ID
-}
-
-func handleLogout(w http.ResponseWriter, r *http.Request) {
-	// 1. 清除本地 Cookie
-	clearCookie(w, "quartz_session")
-	clearCookie(w, "casdoor_session_id")
-	clearCookie(w, "quartz_username")
-
-	// 2. 编码重定向目标
-	// 确保 BaseURL 是 http://127.0.0.1:8766
-	target := conf.BaseURL + "/"
-	encodedTarget := url.QueryEscape(target)
-
-	// // 3. 构造 Casdoor 登出链接
-	// // logoutURL := fmt.Sprintf("%s/api/logout?post_logout_redirect_uri=%s",
-	// logoutURL := fmt.Sprintf("%s/api/logout?redirect_uri=%s",
-	// 	conf.CasdoorAddr, encodedTarget)
-
-	log.Printf("[AUTH] 正在退出并回跳至: %s", target)
-	http.Redirect(w, r, encodedTarget, http.StatusFound)
-}
-
-// ---------------- 辅助函数  ----------------
-
-func redirectToLogin(w http.ResponseWriter, r *http.Request) {
-	loginURL := fmt.Sprintf("%s/login/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=read&state=%s",
-		conf.CasdoorAddr, conf.ClientID, url.QueryEscape(conf.RedirectPath), conf.AppName)
-	http.Redirect(w, r, loginURL, http.StatusFound)
+// 检查认证 cookie 是否有效
+func checkAuthCookie(r *http.Request) bool {
+	cookie, err := r.Cookie("quartz_auth")
+	return err == nil && cookie.Value == "valid"
 }
 
 func serveQuartzFile(w http.ResponseWriter, r *http.Request, relPath string) {
-	// 1. 统一斜杠方向并清理多余斜杠
 	cleanRelPath := filepath.Clean(filepath.FromSlash(relPath))
-
-	// 2. 拼接完整路径 (conf.QuartzDir 已经是绝对路径或规范路径)
 	fullPath := filepath.Join(conf.QuartzDir, cleanRelPath)
 
-	// 3. 调试日志：如果还是 404，看这里打印出来的路径对不对
-	// log.Printf("[DEBUG] 尝试读取文件: %s", fullPath)
+	// 检查是否为 HTML 文件
+	isHTML := strings.HasSuffix(relPath, ".html") || strings.HasSuffix(relPath, ".htm")
 
-	// 如果请求的是 HTML 文件，禁用缓存，强制浏览器每次回退都要询问服务器
-	if strings.HasSuffix(relPath, ".html") || relPath == "/" {
+	if isHTML {
+		// 读取文件内容
+		file, err := os.Open(fullPath)
+		if err != nil {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+		content, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			http.Error(w, "Read error", http.StatusInternalServerError)
+			return
+		}
+
+		// 设置缓存控制
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+		w.Write(content)
 	} else {
-		// JS/CSS/图片等资源可以缓存，提升速度
+		// 非 HTML 文件（JS/CSS/图片等）
 		w.Header().Set("Cache-Control", "public, max-age=31536000")
+		http.ServeFile(w, r, fullPath)
 	}
-
-	http.ServeFile(w, r, fullPath)
-}
-
-func checkAuth(r *http.Request) bool {
-	cookie, err := r.Cookie("quartz_session")
-	return err == nil && cookie.Value == "is_authenticated"
-}
-
-func clearCookie(w http.ResponseWriter, name string) {
-	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: "", Path: "/", MaxAge: -1,
-	})
-}
-
-func isStaticResource(p string) bool {
-	ext := strings.ToLower(filepath.Ext(p))
-	return ext != "" && ext != ".html" && ext != ".htm"
 }
 
 func loadConfig() {
 	file, err := os.Open("config.json")
 	if err != nil {
-		log.Fatal("❌ 找不到 config.json")
+		log.Fatal("找不到 config.json")
 	}
 	defer file.Close()
 	if err := json.NewDecoder(file).Decode(&conf); err != nil {
-		log.Fatal("❌ 配置文件解析错误")
+		log.Fatal("配置文件解析错误")
 	}
 	conf.QuartzDir = filepath.Clean(conf.QuartzDir)
+
+	// 设置默认值
+	if conf.AuthUserParam == "" {
+		conf.AuthUserParam = "user"
+	}
+	if conf.AuthPwdParam == "" {
+		conf.AuthPwdParam = "pwd"
+	}
+	if conf.CookieMaxAge <= 0 {
+		conf.CookieMaxAge = 3600
+	}
+	if conf.ForbiddenPage == "" {
+		conf.ForbiddenPage = "401.html"
+	}
 }
